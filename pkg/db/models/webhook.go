@@ -42,3 +42,28 @@ type WebhookDelivery struct {
 	ResponseBody    string         `db:"response_body"`
 	CreatedAt       time.Time      `db:"created_at"`
 }
+
+// Pending delivery statuses.
+const (
+	WebhookPendingStatusPending  = 0
+	WebhookPendingStatusInFlight = 1
+	WebhookPendingStatusDead     = 2
+)
+
+// WebhookPendingDelivery is a durable, not-yet-completed webhook delivery.
+// A row exists only while a delivery is pending or in-flight; it is removed
+// once the request succeeds or marked dead after retries are exhausted.
+// Every actual HTTP attempt is recorded separately in WebhookDelivery.
+type WebhookPendingDelivery struct {
+	ID          int64         `db:"id"`
+	WebhookID   int64         `db:"webhook_id"`
+	Event       int           `db:"event"`
+	EventKey    string        `db:"event_key"`
+	RequestBody string        `db:"request_body"`
+	Status      int           `db:"status"`
+	Attempts    int           `db:"attempts"`
+	NextRetryAt int64         `db:"next_retry_at"`
+	ClaimedAt   sql.NullInt64 `db:"claimed_at"`
+	CreatedAt   time.Time     `db:"created_at"`
+	UpdatedAt   time.Time     `db:"updated_at"`
+}

@@ -25,7 +25,8 @@ git -C repo-123 add -A
 git -C repo-123 commit -m 'first'
 git -C repo-123 push origin HEAD
 
-# list webhook deliveries
+# list webhook deliveries (delivery is durable and retried asynchronously)
+wait-deliveries repo-123 1
 soft repo webhook deliver list repo-123 1
 stdout '✅.*push.*'
 

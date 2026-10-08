@@ -108,6 +108,7 @@ func TestScript(t *testing.T) {
 			"ensureserverrunning":    cmdEnsureServerRunning,
 			"ensureservernotrunning": cmdEnsureServerNotRunning,
 			"stopserver":             cmdStopserver,
+			"wait-deliveries":        cmdWaitDeliveries("admin", admin1.Signer()),
 			"ui":                     cmdUI(admin1.Signer()),
 			"uui":                    cmdUI(user1.Signer()),
 		},
@@ -438,6 +439,69 @@ func cmdNewWebhook(ts *testscript.TestScript, neg bool, args []string) {
 	check(ts, json.NewDecoder(resp.Body).Decode(&site), neg)
 
 	ts.Setenv(args[0], whSite+"/"+site.UUID)
+}
+
+// cmdWaitDeliveries polls the webhook delivery list over SSH until at least
+// min (default 1) successful (✅) deliveries show up. Webhook delivery is
+// asynchronous (the dispatcher polls its durable queue), so scripts must
+// wait rather than asserting immediately after the triggering command.
+// Usage: wait-deliveries REPOSITORY WEBHOOK_ID [MIN_SUCCESSFUL]
+func cmdWaitDeliveries(user string, keys ...ssh.Signer) func(ts *testscript.TestScript, neg bool, args []string) {
+	return func(ts *testscript.TestScript, neg bool, args []string) {
+		if neg {
+			ts.Fatalf("unsupported: ! wait-deliveries")
+		}
+		if len(args) < 2 || len(args) > 3 {
+			ts.Fatalf("usage: wait-deliveries REPOSITORY WEBHOOK_ID [MIN_SUCCESSFUL]")
+		}
+
+		min := 1
+		if len(args) == 3 {
+			n, err := strconv.Atoi(args[2])
+			if err != nil || n < 1 {
+				ts.Fatalf("invalid MIN_SUCCESSFUL: %q", args[2])
+			}
+			min = n
+		}
+		command := strings.Join([]string{"repo", "webhook", "deliver", "list", args[0], args[1]}, " ")
+
+		deadline := time.Now().Add(45 * time.Second)
+		var last string
+		for {
+			cli, err := ssh.Dial(
+				"tcp",
+				net.JoinHostPort("localhost", ts.Getenv("SSH_PORT")),
+				&ssh.ClientConfig{
+					User:            user,
+					Auth:            []ssh.AuthMethod{ssh.PublicKeys(keys...)},
+					HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				},
+			)
+			ts.Check(err)
+
+			var buf bytes.Buffer
+			sess, err := cli.NewSession()
+			ts.Check(err)
+			sess.Stdout = &buf
+			sess.Stderr = ts.Stderr()
+			err = sess.Run(command)
+			sess.Close()
+			cli.Close()
+
+			if err == nil {
+				last = buf.String()
+				if strings.Count(last, "✅") >= min {
+					ts.Stdout().Write(buf.Bytes()) //nolint:errcheck
+					return
+				}
+			}
+
+			if time.Now().After(deadline) {
+				ts.Fatalf("timed out waiting for %d successful webhook delivery(ies), last list:\n%s", min, last)
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
 }
 
 func cmdCurl(ts *testscript.TestScript, neg bool, args []string) {

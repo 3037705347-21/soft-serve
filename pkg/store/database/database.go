@@ -41,6 +41,7 @@ func New(ctx context.Context, db *db.DB) store.Store {
 		collabStore:      &collabStore{},
 		lfsStore:         &lfsStore{},
 		accessTokenStore: &accessTokenStore{},
+		webhookStore:     &webhookStore{},
 	}
 
 	return s

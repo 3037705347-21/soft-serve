@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/stats"
 	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/charmbracelet/soft-serve/pkg/web"
+	"github.com/charmbracelet/soft-serve/pkg/webhook"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -36,6 +37,8 @@ type Server struct {
 	Config      *config.Config
 	Backend     *backend.Backend
 	DB          *db.DB
+	// WebhookDispatcher retries durably enqueued webhook deliveries.
+	WebhookDispatcher *webhook.Dispatcher
 
 	logger *log.Logger
 	ctx    context.Context
@@ -106,6 +109,10 @@ func NewServer(ctx context.Context) (*Server, error) {
 	}
 
 	warnIfAnonAdminAccess(ctx, be, logger)
+
+	// Deliver webhook events enqueued durably by request handlers and git
+	// hook processes, retrying failures and recovering across restarts.
+	srv.WebhookDispatcher = webhook.StartDispatcher(ctx)
 
 	return srv, nil
 }
@@ -251,6 +258,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.Cron.Stop()
 		return nil
 	})
+	errg.Go(func() error {
+		if s.WebhookDispatcher != nil {
+			s.WebhookDispatcher.Stop()
+		}
+		return nil
+	})
 	// defer s.DB.Close() // nolint: errcheck
 	return errg.Wait()
 }
@@ -266,6 +279,12 @@ func (s *Server) Close() error {
 		s.Cron.Stop()
 		return nil
 	})
-	// defer s.DB.Close() // nolint: errcheck
+	errg.Go(func() error {
+		if s.WebhookDispatcher != nil {
+			s.WebhookDispatcher.Stop()
+		}
+		return nil
+	})
+	// defer s.DB.Close() // nolint:errcheck
 	return errg.Wait()
 }

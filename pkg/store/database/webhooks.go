@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
@@ -93,6 +94,107 @@ func (*webhookStore) GetWebhookByID(ctx context.Context, h db.Handler, repoID in
 	return wh, err
 }
 
+// GetWebhookByIDOnly implements store.WebhookStore.
+func (*webhookStore) GetWebhookByIDOnly(ctx context.Context, h db.Handler, id int64) (models.Webhook, error) {
+	query := h.Rebind(`SELECT * FROM webhooks WHERE id = ?;`)
+	var wh models.Webhook
+	err := h.GetContext(ctx, &wh, query, id)
+	return wh, err
+}
+
+// CreateWebhookPendingDelivery implements store.WebhookStore.
+func (*webhookStore) CreateWebhookPendingDelivery(ctx context.Context, h db.Handler, webhookID int64, event int, eventKey string, requestBody string, nextRetryAt int64) error {
+	query := h.Rebind(`INSERT INTO webhook_pending_deliveries
+			(webhook_id, event, event_key, request_body, status, attempts, next_retry_at)
+			VALUES (?, ?, ?, ?, 0, 0, ?)
+			ON CONFLICT DO NOTHING;`)
+	_, err := h.ExecContext(ctx, query, webhookID, event, eventKey, requestBody, nextRetryAt)
+	return err
+}
+
+// ClaimDueWebhookPendingDeliveries implements store.WebhookStore.
+func (*webhookStore) ClaimDueWebhookPendingDeliveries(ctx context.Context, h db.Handler, now int64, staleBefore int64, limit int) ([]models.WebhookPendingDelivery, error) {
+	// Keep the SELECT portable across SQLite/Postgres and do the due/stale
+	// filtering in Go: the queue only holds outstanding rows, so this scan
+	// stays small. The actual claim is a conditional UPDATE and only the
+	// caller that transitions the row (RowsAffected == 1) owns the send.
+	query := h.Rebind(`SELECT * FROM webhook_pending_deliveries
+			WHERE status IN (?, ?)
+			ORDER BY id
+			LIMIT ?;`)
+	var candidates []models.WebhookPendingDelivery
+	if err := h.SelectContext(ctx, &candidates, query,
+		models.WebhookPendingStatusPending, models.WebhookPendingStatusInFlight, limit); err != nil {
+		return nil, err
+	}
+
+	claimed := make([]models.WebhookPendingDelivery, 0)
+	claimQuery := h.Rebind(`UPDATE webhook_pending_deliveries
+			SET status = ?, claimed_at = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND status IN (?, ?);`)
+	for _, c := range candidates {
+		due := false
+		switch c.Status {
+		case models.WebhookPendingStatusPending:
+			due = c.NextRetryAt <= now
+		case models.WebhookPendingStatusInFlight:
+			due = c.ClaimedAt.Valid && c.ClaimedAt.Int64 <= staleBefore
+		}
+		if !due {
+			continue
+		}
+
+		res, err := h.ExecContext(ctx, claimQuery,
+			models.WebhookPendingStatusInFlight, now, c.ID,
+			models.WebhookPendingStatusPending, models.WebhookPendingStatusInFlight)
+		if err != nil {
+			return nil, err
+		}
+
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if n != 1 {
+			// Another dispatcher claimed the row first.
+			continue
+		}
+
+		c.Status = models.WebhookPendingStatusInFlight
+		c.ClaimedAt = sql.NullInt64{Int64: now, Valid: true}
+		claimed = append(claimed, c)
+	}
+
+	return claimed, nil
+}
+
+// DeleteWebhookPendingDelivery implements store.WebhookStore.
+func (*webhookStore) DeleteWebhookPendingDelivery(ctx context.Context, h db.Handler, id int64) error {
+	query := h.Rebind(`DELETE FROM webhook_pending_deliveries WHERE id = ?;`)
+	_, err := h.ExecContext(ctx, query, id)
+	return err
+}
+
+// RequeueWebhookPendingDelivery implements store.WebhookStore.
+func (*webhookStore) RequeueWebhookPendingDelivery(ctx context.Context, h db.Handler, id int64, attempts int, status int, nextRetryAt int64) error {
+	query := h.Rebind(`UPDATE webhook_pending_deliveries
+			SET attempts = ?, status = ?, next_retry_at = ?, claimed_at = NULL,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?;`)
+	_, err := h.ExecContext(ctx, query, attempts, status, nextRetryAt, id)
+	return err
+}
+
+// CountWebhookPendingDeliveriesByWebhookID implements store.WebhookStore.
+func (*webhookStore) CountWebhookPendingDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) (int64, error) {
+	query := h.Rebind(`SELECT COUNT(*) FROM webhook_pending_deliveries
+			WHERE webhook_id = ? AND status IN (?, ?);`)
+	var count int64
+	err := h.GetContext(ctx, &count, query,
+		webhookID, models.WebhookPendingStatusPending, models.WebhookPendingStatusInFlight)
+	return count, err
+}
+
 // GetWebhookDeliveriesByWebhookID implements store.WebhookStore.
 func (*webhookStore) GetWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error) {
 	query := h.Rebind(`SELECT * FROM webhook_deliveries WHERE webhook_id = ?;`)
@@ -138,7 +240,7 @@ func (*webhookStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Han
 	query, args, err := sqlx.In(`SELECT webhooks.*
 			FROM webhooks
 			INNER JOIN webhook_events ON webhooks.id = webhook_events.webhook_id
-			WHERE webhooks.repo_id = ? AND webhook_events.event IN (?);`, repoID, events)
+			WHERE webhooks.repo_id = ? AND webhooks.active = ? AND webhook_events.event IN (?);`, repoID, true, events)
 	if err != nil {
 		return nil, err
 	}

@@ -12,6 +12,9 @@ import (
 type WebhookStore interface {
 	// GetWebhookByID returns a webhook by its ID.
 	GetWebhookByID(ctx context.Context, h db.Handler, repoID int64, id int64) (models.Webhook, error)
+	// GetWebhookByIDOnly returns a webhook by its ID, scoped by ID alone.
+	// This is only meant for internal callers such as the delivery dispatcher.
+	GetWebhookByIDOnly(ctx context.Context, h db.Handler, id int64) (models.Webhook, error)
 	// GetWebhooksByRepoID returns all webhooks for a repository.
 	GetWebhooksByRepoID(ctx context.Context, h db.Handler, repoID int64) ([]models.Webhook, error)
 	// GetWebhooksByRepoIDWhereEvent returns all webhooks for a repository where event is in the events.
@@ -45,4 +48,23 @@ type WebhookStore interface {
 	CreateWebhookDelivery(ctx context.Context, h db.Handler, id uuid.UUID, webhookID int64, event int, url string, method string, requestError error, requestHeaders string, requestBody string, responseStatus int, responseHeaders string, responseBody string) error
 	// DeleteWebhookDeliveryByID deletes a webhook delivery by its ID.
 	DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler, webhookID int64, id uuid.UUID) error
+
+	// CreateWebhookPendingDelivery durably enqueues a webhook delivery.
+	// It is a no-op when an outstanding (pending or in-flight) record with
+	// the same webhookID/eventKey already exists.
+	CreateWebhookPendingDelivery(ctx context.Context, h db.Handler, webhookID int64, event int, eventKey string, requestBody string, nextRetryAt int64) error
+	// ClaimDueWebhookPendingDeliveries atomically claims due pending
+	// deliveries, as well as in-flight deliveries whose claim is older than
+	// staleBefore (crash recovery), and returns the claimed rows.
+	ClaimDueWebhookPendingDeliveries(ctx context.Context, h db.Handler, now int64, staleBefore int64, limit int) ([]models.WebhookPendingDelivery, error)
+	// DeleteWebhookPendingDelivery removes a pending delivery, used once it
+	// has been delivered successfully.
+	DeleteWebhookPendingDelivery(ctx context.Context, h db.Handler, id int64) error
+	// RequeueWebhookPendingDelivery reschedules a claimed delivery: sets the
+	// attempts count, status (pending or dead), next retry time and clears
+	// the in-flight claim.
+	RequeueWebhookPendingDelivery(ctx context.Context, h db.Handler, id int64, attempts int, status int, nextRetryAt int64) error
+	// CountWebhookPendingDeliveriesByWebhookID counts outstanding (pending or
+	// in-flight) pending deliveries for a webhook.
+	CountWebhookPendingDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) (int64, error)
 }
