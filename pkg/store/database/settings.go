@@ -41,7 +41,41 @@ func (*settingsStore) SetAllowKeylessAccess(ctx context.Context, tx db.Handler, 
 
 // SetAnonAccess implements store.SettingStore.
 func (*settingsStore) SetAnonAccess(ctx context.Context, tx db.Handler, level access.AccessLevel) error {
-	query := tx.Rebind(`UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE "key" = 'anon_access'`)
-	_, err := tx.ExecContext(ctx, query, level.String())
+	query := tx.Rebind(`UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE "key" = ?`)
+	_, err := tx.ExecContext(ctx, query, level.String(), "anon_access")
+	return db.WrapError(err)
+}
+
+// GetReconcileReport implements store.SettingStore. It wraps
+// db.ErrRecordNotFound when no report has been persisted yet.
+func (*settingsStore) GetReconcileReport(ctx context.Context, tx db.Handler) (string, error) {
+	var report string
+	query := tx.Rebind(`SELECT value FROM settings WHERE "key" = ?`)
+	if err := tx.GetContext(ctx, &report, query, store.ReconcileReportSettingKey); err != nil {
+		return "", db.WrapError(err)
+	}
+	return report, nil
+}
+
+// SetReconcileReport implements store.SettingStore. It upserts portably: the
+// row is updated in place and inserted only when the key does not exist yet.
+func (*settingsStore) SetReconcileReport(ctx context.Context, tx db.Handler, report string) error {
+	query := tx.Rebind(`UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE "key" = ?`)
+	res, err := tx.ExecContext(ctx, query, report, store.ReconcileReportSettingKey)
+	if err != nil {
+		return db.WrapError(err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		return db.WrapError(err)
+	}
+
+	if n > 0 {
+		return nil
+	}
+
+	insert := tx.Rebind(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`)
+	_, err = tx.ExecContext(ctx, insert, store.ReconcileReportSettingKey, report)
 	return db.WrapError(err)
 }

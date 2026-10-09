@@ -1,0 +1,81 @@
+# vi: set ft=conf
+
+# End-to-end evidence for controlled storage reconciliation:
+# a catalog row whose directory was lost gets quarantined through an admin
+# manifest, the quarantined repository disappears from listings and HTTP
+# while healthy repositories keep serving, and an explicit admin
+# unquarantine (only after the bare directory is back) restores service.
+
+[windows] skip 'unix filesystem layout and system git'
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# create two public repositories
+soft repo create goner
+stdout ssh://localhost:$SSH_PORT/goner.git
+soft repo create healthy
+stdout ssh://localhost:$SSH_PORT/healthy.git
+
+# both repositories serve over HTTP before the migration incident
+curl -XGET http://localhost:$HTTP_PORT/goner.git/info/refs?service=git-upload-pack
+stdout 'service=git-upload-pack'
+curl -XGET http://localhost:$HTTP_PORT/healthy.git/info/refs?service=git-upload-pack
+stdout 'service=git-upload-pack'
+
+# simulate the lost data disk: catalog row remains, directory is gone
+rm $DATA_PATH/repos/goner.git
+! exists $DATA_PATH/repos/goner.git/HEAD
+
+# run the controlled reconciliation with an explicit manifest
+exec soft admin storage-reconcile --manifest manifest.yaml
+stdout 'quarantined=1'
+stdout 'Status:   success'
+
+# the final report is available from the admin entry point
+exec soft admin reconcile-status
+stdout 'manifest.yaml'
+stdout 'goner.*quarantined'
+stdout 'Status:   success'
+
+# rerunning converges with no new mutations
+exec soft admin storage-reconcile --manifest manifest.yaml
+stdout 'already-in-place=1'
+stdout 'quarantined=0'
+
+# quarantined repository is refused over HTTP while a healthy one still serves
+curl -v -XGET http://localhost:$HTTP_PORT/goner.git/info/refs?service=git-upload-pack
+stderr '401'
+curl -v -XGET http://localhost:$HTTP_PORT/healthy.git/info/refs?service=git-upload-pack
+stderr '200'
+
+# quarantined repository is excluded from listings
+soft repo list
+stdout 'healthy'
+! stdout 'goner'
+
+# unquarantine is refused while the directory is still missing
+! exec soft admin unquarantine goner
+stderr 'no valid bare repository'
+
+# directory restored on disk by the migration follow-up
+exec git init --bare $DATA_PATH/repos/goner.git
+
+# explicit admin unquarantine restores service
+exec soft admin unquarantine goner
+stdout 'restored from quarantine'
+curl -v -XGET http://localhost:$HTTP_PORT/goner.git/info/refs?service=git-upload-pack
+stderr '200'
+
+# the repository is back in listings
+soft repo list
+stdout 'goner'
+stdout 'healthy'
+
+-- manifest.yaml --
+version: 1
+quarantine:
+  - name: goner
+    reason: old data disk failed during migration

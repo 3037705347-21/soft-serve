@@ -13,6 +13,10 @@ var (
 	ErrFileNotFound = errors.New("file not found")
 	// ErrRepoNotFound is returned when a repository is not found.
 	ErrRepoNotFound = errors.New("repository not found")
+	// ErrRepoQuarantined is returned when a repository is quarantined by
+	// a storage reconciliation (its catalog row remains, but it is excluded
+	// from every serving path until explicitly restored).
+	ErrRepoQuarantined = errors.New("repository is quarantined")
 	// ErrRepoExist is returned when a repository already exists.
 	ErrRepoExist = errors.New("repository already exists")
 	// ErrUserNotFound is returned when a user is not found.

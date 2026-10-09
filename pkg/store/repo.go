@@ -26,4 +26,7 @@ type RepositoryStore interface {
 	SetRepoIsHiddenByName(ctx context.Context, h db.Handler, name string, isHidden bool) error
 	GetRepoIsMirrorByName(ctx context.Context, h db.Handler, name string) (bool, error)
 	SetRepoIsMirrorByName(ctx context.Context, h db.Handler, name string, isMirror bool) error
+	GetRepoQuarantinedByName(ctx context.Context, h db.Handler, name string) (bool, error)
+	SetRepoQuarantinedByName(ctx context.Context, h db.Handler, name string, quarantined bool) error
+	GetQuarantinedRepos(ctx context.Context, h db.Handler) ([]models.Repo, error)
 }

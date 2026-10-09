@@ -14,6 +14,7 @@ type Repo struct {
 	Private     bool          `db:"private"`
 	Mirror      bool          `db:"mirror"`
 	Hidden      bool          `db:"hidden"`
+	Quarantined bool          `db:"quarantined"`
 	UserID      sql.NullInt64 `db:"user_id"`
 	CreatedAt   time.Time     `db:"created_at"`
 	UpdatedAt   time.Time     `db:"updated_at"`

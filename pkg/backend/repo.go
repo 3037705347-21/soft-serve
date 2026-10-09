@@ -305,7 +305,10 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 			return err
 		}
 		wh = &ev
-	case !errors.Is(err, proto.ErrRepoNotFound):
+	case errors.Is(err, proto.ErrRepoNotFound), errors.Is(err, proto.ErrRepoQuarantined):
+		// No servable repository (missing directory or quarantined): the
+		// row is deleted below without a webhook event.
+	default:
 		return err
 	}
 
@@ -432,6 +435,12 @@ func (d *Backend) Repositories(ctx context.Context) ([]proto.Repository, error) 
 		}
 
 		for _, m := range ms {
+			// Quarantined repositories are excluded from every listing
+			// (SSH, TUI, web, mirror jobs, hook synchronization).
+			if m.Quarantined {
+				continue
+			}
+
 			r := &repo{
 				name: m.Name,
 				path: filepath.Join(d.repoPath(m.Name)),
@@ -449,6 +458,24 @@ func (d *Backend) Repositories(ctx context.Context) ([]proto.Repository, error) 
 	return repos, nil
 }
 
+// QuarantinedRepos returns the catalog rows flagged quarantined by a storage
+// reconciliation. Unlike Repositories it does not filter or require on-disk
+// state, so administrators can inspect quarantined rows even when their
+// directories are gone.
+func (d *Backend) QuarantinedRepos(ctx context.Context) ([]models.Repo, error) {
+	var repos []models.Repo
+
+	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
+		var err error
+		repos, err = d.store.GetQuarantinedRepos(ctx, tx)
+		return db.WrapError(err)
+	}); err != nil {
+		return nil, db.WrapError(err)
+	}
+
+	return repos, nil
+}
+
 // Repository returns a repository by name.
 //
 // It implements backend.Backend.
@@ -457,6 +484,24 @@ func (d *Backend) Repository(ctx context.Context, name string) (proto.Repository
 	name = utils.SanitizeRepo(name)
 
 	rp := filepath.Join(d.repoPath(name))
+
+	// Resolve the catalog row first so a quarantined row is refused even when
+	// its directory has reappeared on disk; restoration requires an explicit
+	// admin unquarantine.
+	haveRow := true
+	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
+		var err error
+		m, err = d.store.GetRepoByName(ctx, tx, name)
+		return db.WrapError(err)
+	}); err != nil {
+		if !errors.Is(err, db.ErrRecordNotFound) {
+			return nil, db.WrapError(err)
+		}
+		haveRow = false
+	} else if m.Quarantined {
+		return nil, proto.ErrRepoQuarantined
+	}
+
 	if _, err := os.Stat(rp); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			d.logger.Errorf("failed to stat repository path: %v", err)
@@ -464,15 +509,9 @@ func (d *Backend) Repository(ctx context.Context, name string) (proto.Repository
 		return nil, proto.ErrRepoNotFound
 	}
 
-	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
-		var err error
-		m, err = d.store.GetRepoByName(ctx, tx, name)
-		return db.WrapError(err)
-	}); err != nil {
-		if errors.Is(err, db.ErrRecordNotFound) {
-			return nil, proto.ErrRepoNotFound
-		}
-		return nil, db.WrapError(err)
+	// A directory without a catalog row is not a served repository.
+	if !haveRow {
+		return nil, proto.ErrRepoNotFound
 	}
 
 	r := &repo{

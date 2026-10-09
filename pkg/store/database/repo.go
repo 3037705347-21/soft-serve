@@ -158,3 +158,28 @@ func (*repoStore) SetRepoProjectNameByName(ctx context.Context, tx db.Handler, n
 	_, err := tx.ExecContext(ctx, query, projectName, name)
 	return db.WrapError(err)
 }
+
+// GetRepoQuarantinedByName implements store.RepositoryStore.
+func (*repoStore) GetRepoQuarantinedByName(ctx context.Context, tx db.Handler, name string) (bool, error) {
+	var quarantined bool
+	name = utils.SanitizeRepo(name)
+	query := tx.Rebind("SELECT quarantined FROM repos WHERE name = ?;")
+	err := tx.GetContext(ctx, &quarantined, query, name)
+	return quarantined, db.WrapError(err)
+}
+
+// SetRepoQuarantinedByName implements store.RepositoryStore.
+func (*repoStore) SetRepoQuarantinedByName(ctx context.Context, tx db.Handler, name string, quarantined bool) error {
+	name = utils.SanitizeRepo(name)
+	query := tx.Rebind("UPDATE repos SET quarantined = ? WHERE name = ?;")
+	_, err := tx.ExecContext(ctx, query, quarantined, name)
+	return db.WrapError(err)
+}
+
+// GetQuarantinedRepos implements store.RepositoryStore.
+func (*repoStore) GetQuarantinedRepos(ctx context.Context, tx db.Handler) ([]models.Repo, error) {
+	var repos []models.Repo
+	query := tx.Rebind("SELECT * FROM repos WHERE quarantined = TRUE;")
+	err := tx.SelectContext(ctx, &repos, query)
+	return repos, db.WrapError(err)
+}
